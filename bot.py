@@ -17,7 +17,11 @@ STAFF_ROLE_ID     = 1474823002490405016
 BOOSTER_ROLE_ID   = 1469733875709378674
 BOOSTER_ROLE_2_ID = 1471590464279810210
 
-SERVICES = ["steam", "xbox", "minecraft", "roblox", "crunchyroll", "nordvpn"]
+SERVICES = [
+    "steam", "xbox", "minecraft", "roblox",
+    "crunchyroll", "nordvpn", "netflix", "disney",
+    "hotmail", "capcut", "spotify"
+]
 # ==========================================
 
 intents = discord.Intents.default()
@@ -32,53 +36,47 @@ def db():
 def init_db():
     with db() as con:
         cur = con.cursor()
-
         for svc in SERVICES:
             cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {svc}_accounts (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT,
-                password TEXT,
-                extra    TEXT DEFAULT ''
-            )
+                CREATE TABLE IF NOT EXISTS {svc}_accounts (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT,
+                    password TEXT,
+                    extra    TEXT DEFAULT ''
+                )
             """)
-
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS gens (
-            user_id INTEGER,
-            service TEXT,
-            day     TEXT
-        )
+            CREATE TABLE IF NOT EXISTS gens (
+                user_id INTEGER,
+                service TEXT,
+                day     TEXT
+            )
         """)
-
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS reports (
-            account TEXT,
-            service TEXT,
-            reason  TEXT
-        )
+            CREATE TABLE IF NOT EXISTS reports (
+                account TEXT,
+                service TEXT,
+                reason  TEXT
+            )
         """)
-
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            owner_id INTEGER,
-            code     TEXT UNIQUE
-        )
+            CREATE TABLE IF NOT EXISTS referrals (
+                owner_id INTEGER,
+                code     TEXT UNIQUE
+            )
         """)
-
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS referral_uses (
-            user_id INTEGER UNIQUE
-        )
+            CREATE TABLE IF NOT EXISTS referral_uses (
+                user_id INTEGER UNIQUE
+            )
         """)
-
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS vouches (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id   INTEGER,
-            message   TEXT,
-            timestamp TEXT
-        )
+            CREATE TABLE IF NOT EXISTS vouches (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id   INTEGER,
+                message   TEXT,
+                timestamp TEXT
+            )
         """)
 
 # ================= HELPERS =================
@@ -128,25 +126,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 # ================= FILE PARSERS =================
 def parse_steam_file(text: str):
-    """
-    Parses Steam account files. Supports:
-      user:pass|Game1/Game2       (inline with pipe)
-      user:pass - Game1, Game2    (inline with dash)
-      Game1                       (block format)
-      Game2
-      user:pass
-    """
     results = []
     lines = [l.rstrip() for l in text.splitlines()]
     i = 0
-
     while i < len(lines):
         line = lines[i].strip()
         if not line:
             i += 1
             continue
-
-        # Inline pipe format: user:pass|Games
+        # Inline pipe: user:pass|Games
         if "|" in line and ":" in line.split("|")[0]:
             creds, games = line.split("|", 1)
             user, pwd = creds.split(":", 1)
@@ -154,9 +142,8 @@ def parse_steam_file(text: str):
                 results.append((user.strip(), pwd.strip(), games.strip()))
             i += 1
             continue
-
-        # Inline dash format: user:pass - Games
-        norm = line.replace(" - ", "|").replace(" | ", "|")
+        # Inline dash: user:pass - Games
+        norm = line.replace(" - ", "|")
         if "|" in norm and ":" in norm.split("|")[0]:
             creds, games = norm.split("|", 1)
             user, pwd = creds.split(":", 1)
@@ -164,13 +151,11 @@ def parse_steam_file(text: str):
                 results.append((user.strip(), pwd.strip(), games.strip()))
             i += 1
             continue
-
-        # Block format: collect non-empty lines, find credentials line
+        # Block format
         block = []
         while i < len(lines) and lines[i].strip():
             block.append(lines[i].strip())
             i += 1
-
         cred_idx = None
         for j, bl in enumerate(block):
             if ":" in bl:
@@ -178,26 +163,20 @@ def parse_steam_file(text: str):
                 if user_part and " " not in user_part:
                     cred_idx = j
                     break
-
         if cred_idx is None:
             continue
-
         game_lines = [bl for bl in block[:cred_idx] if bl]
-        cred_line  = block[cred_idx]
-        user, pwd  = cred_line.split(":", 1)
-        user, pwd  = user.strip(), pwd.strip()
-
+        cred_line = block[cred_idx]
+        user, pwd = cred_line.split(":", 1)
+        user, pwd = user.strip(), pwd.strip()
         if not user or not pwd:
             continue
-
         games = ", ".join(game_lines) if game_lines else ""
         results.append((user, pwd, games))
-
     return results
 
 
 def parse_simple_file(text: str):
-    """Parses plain user:pass per line files for Xbox, Minecraft, Roblox, Crunchyroll, NordVPN."""
     results = []
     for line in text.splitlines():
         line = line.strip()
@@ -216,6 +195,11 @@ SERVICE_COLORS = {
     "roblox":     discord.Color.from_rgb(226, 35, 26),
     "crunchyroll":discord.Color.from_rgb(255, 90, 0),
     "nordvpn":    discord.Color.from_rgb(0, 99, 220),
+    "netflix":    discord.Color.from_rgb(229, 9, 20),
+    "disney":     discord.Color.from_rgb(17, 60, 165),
+    "hotmail":    discord.Color.from_rgb(0, 120, 212),
+    "capcut":     discord.Color.from_rgb(0, 0, 0),
+    "spotify":    discord.Color.from_rgb(30, 215, 96),
 }
 
 SERVICE_EMOJI = {
@@ -225,11 +209,30 @@ SERVICE_EMOJI = {
     "roblox":      "🟥",
     "crunchyroll": "🍥",
     "nordvpn":     "🔒",
+    "netflix":     "🎬",
+    "disney":      "🏰",
+    "hotmail":     "📧",
+    "capcut":      "🎵",
+    "spotify":     "🎧",
+}
+
+SERVICE_DISPLAY = {
+    "steam":       "Steam",
+    "xbox":        "Xbox",
+    "minecraft":   "Minecraft",
+    "roblox":      "Roblox",
+    "crunchyroll": "Crunchyroll",
+    "nordvpn":     "NordVPN",
+    "netflix":     "Netflix",
+    "disney":      "Disney+",
+    "hotmail":     "Hotmail",
+    "capcut":      "CapCut",
+    "spotify":     "Spotify",
 }
 
 def service_embed(service: str, user: str, pwd: str, extra: str) -> discord.Embed:
     embed = discord.Embed(
-        title=f"{SERVICE_EMOJI[service]} Generated {service.capitalize()} Account",
+        title=f"{SERVICE_EMOJI[service]} Generated {SERVICE_DISPLAY[service]} Account",
         description="Crimson Gen has agreed to only distribute accounts they own.\n"
                     "Crimson Gen takes no responsibility for what you do with these accounts.",
         color=SERVICE_COLORS[service],
@@ -291,16 +294,21 @@ async def on_ready():
 # ================= /generate =================
 @bot.tree.command(name="generate", description="Generate a free account")
 @app_commands.describe(
-    service="Which service",
+    service="Which service to generate",
     game="Steam only — filter by game name (optional)"
 )
 @app_commands.choices(service=[
-    app_commands.Choice(name="🎮 Steam",       value="steam"),
-    app_commands.Choice(name="🟢 Xbox",        value="xbox"),
-    app_commands.Choice(name="⛏️ Minecraft",   value="minecraft"),
-    app_commands.Choice(name="🟥 Roblox",      value="roblox"),
-    app_commands.Choice(name="🍥 Crunchyroll", value="crunchyroll"),
-    app_commands.Choice(name="🔒 NordVPN",     value="nordvpn"),
+    app_commands.Choice(name="🎮 Steam",        value="steam"),
+    app_commands.Choice(name="🟢 Xbox",         value="xbox"),
+    app_commands.Choice(name="⛏️ Minecraft",    value="minecraft"),
+    app_commands.Choice(name="🟥 Roblox",       value="roblox"),
+    app_commands.Choice(name="🍥 Crunchyroll",  value="crunchyroll"),
+    app_commands.Choice(name="🔒 NordVPN",      value="nordvpn"),
+    app_commands.Choice(name="🎬 Netflix",      value="netflix"),
+    app_commands.Choice(name="🏰 Disney+",      value="disney"),
+    app_commands.Choice(name="📧 Hotmail",      value="hotmail"),
+    app_commands.Choice(name="🎵 CapCut",       value="capcut"),
+    app_commands.Choice(name="🎧 Spotify",      value="spotify"),
 ])
 async def generate(interaction: discord.Interaction, service: str, game: str = None):
     await interaction.response.defer(ephemeral=True)
@@ -329,7 +337,7 @@ async def generate(interaction: discord.Interaction, service: str, game: str = N
         row = cur.fetchone()
 
         if not row:
-            label = f"{service.capitalize()}{f' ({game})' if game else ''}"
+            label = f"{SERVICE_DISPLAY[service]}{f' ({game})' if game else ''}"
             await interaction.followup.send(f"❌ No **{label}** accounts in stock.", ephemeral=True)
             return
 
@@ -363,7 +371,7 @@ async def stock_cmd(interaction: discord.Interaction):
             cur.execute("SELECT COUNT(*) FROM reports WHERE service=?", (svc,))
             reported = cur.fetchone()[0]
             embed.add_field(
-                name=f"{SERVICE_EMOJI[svc]} {svc.capitalize()}",
+                name=f"{SERVICE_EMOJI[svc]} {SERVICE_DISPLAY[svc]}",
                 value=f"✅ **{max(total - reported, 0)}** available\n🚨 **{reported}** reported",
                 inline=True,
             )
@@ -402,8 +410,10 @@ async def listgames(interaction: discord.Interaction):
 @bot.tree.command(name="mystats", description="View your daily gen stats")
 async def mystats(interaction: discord.Interaction):
     limit = daily_limit(interaction.user)
-    lines = [f"{SERVICE_EMOJI[svc]} **{svc.capitalize()}:** {used_today(interaction.user.id, svc)}/{limit}"
-             for svc in SERVICES]
+    lines = [
+        f"{SERVICE_EMOJI[svc]} **{SERVICE_DISPLAY[svc]}:** {used_today(interaction.user.id, svc)}/{limit}"
+        for svc in SERVICES
+    ]
     ref = has_referral(interaction.user.id)
     await interaction.response.send_message(
         "📊 **Your Stats**\n" + "\n".join(lines) + f"\nReferral bonus: **{'Yes' if ref else 'No'}**",
@@ -483,7 +493,9 @@ async def refer(interaction: discord.Interaction, code: str):
 # ================= REPORT / VOUCH =================
 @bot.tree.command(name="report", description="Report a bad account")
 @app_commands.describe(service="Which service", account="Account in user:pass format", reason="Reason")
-@app_commands.choices(service=[app_commands.Choice(name=s.capitalize(), value=s) for s in SERVICES])
+@app_commands.choices(service=[
+    app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
+])
 async def report(interaction: discord.Interaction, service: str, account: str, reason: str = "Invalid"):
     with db() as con:
         con.execute("INSERT INTO reports VALUES (?,?,?)", (account, service, reason))
@@ -509,7 +521,9 @@ async def vouch(interaction: discord.Interaction, message: str):
     service="Which service to restock",
     file="A .txt file. Steam: user:pass|Game1/Game2 per line. Others: user:pass per line."
 )
-@app_commands.choices(service=[app_commands.Choice(name=s.capitalize(), value=s) for s in SERVICES])
+@app_commands.choices(service=[
+    app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
+])
 @app_commands.check(staff_check)
 async def restock(interaction: discord.Interaction, service: str, file: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
@@ -538,19 +552,24 @@ async def restock(interaction: discord.Interaction, service: str, file: discord.
     with db() as con:
         cur = con.cursor()
         for user, pwd, extra in parsed:
-            cur.execute(f"INSERT INTO {table} (username, password, extra) VALUES (?,?,?)", (user, pwd, extra))
+            cur.execute(
+                f"INSERT INTO {table} (username, password, extra) VALUES (?,?,?)",
+                (user, pwd, extra)
+            )
             added += 1
         con.commit()
 
     embed = discord.Embed(title="🔄 Restock Complete", color=discord.Color.green())
-    embed.add_field(name="Service", value=f"{SERVICE_EMOJI[service]} {service.capitalize()}", inline=True)
+    embed.add_field(name="Service", value=f"{SERVICE_EMOJI[service]} {SERVICE_DISPLAY[service]}", inline=True)
     embed.add_field(name="Added",   value=f"**{added}** account(s)", inline=True)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="removeaccount", description="[Staff] Remove an account from stock")
 @app_commands.describe(service="Which service", account="user:pass")
-@app_commands.choices(service=[app_commands.Choice(name=s.capitalize(), value=s) for s in SERVICES])
+@app_commands.choices(service=[
+    app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
+])
 @app_commands.check(staff_check)
 async def removeaccount(interaction: discord.Interaction, service: str, account: str):
     with db() as con:
@@ -573,7 +592,7 @@ async def reportedaccounts(interaction: discord.Interaction):
         return
 
     msg = "🚨 **Reported Accounts**\n" + "\n".join(
-        f"`{acc}` [{svc}] — {reason}" for acc, svc, reason in rows
+        f"`{acc}` [{SERVICE_DISPLAY.get(svc, svc)}] — {reason}" for acc, svc, reason in rows
     )
     await interaction.response.send_message(msg[:2000], ephemeral=True)
 
@@ -605,7 +624,7 @@ async def globalstats(interaction: discord.Interaction):
             cur.execute(f"SELECT COUNT(*) FROM {svc}_accounts")
             total = cur.fetchone()[0]
             embed.add_field(
-                name=f"{SERVICE_EMOJI[svc]} {svc.capitalize()}",
+                name=f"{SERVICE_EMOJI[svc]} {SERVICE_DISPLAY[svc]}",
                 value=f"**{total}** accounts",
                 inline=True
             )
