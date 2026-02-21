@@ -126,41 +126,84 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     else:
         await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
 
-# ================= STEAM FILE PARSER =================
-def is_credential_line(line: str) -> bool:
-    line = line.strip()
-    if ":" not in line:
-        return False
-    user, _ = line.split(":", 1)
-    user = user.strip()
-    return bool(user) and " " not in user
-
-def parse_steam_text(text: str):
-    """Parse Steam accounts with game info. Format: user:pass|Game1/Game2"""
+# ================= FILE PARSERS =================
+def parse_steam_file(text: str):
+    """
+    Parses Steam account files. Supports:
+      user:pass|Game1/Game2       (inline with pipe)
+      user:pass - Game1, Game2    (inline with dash)
+      Game1                       (block format)
+      Game2
+      user:pass
+    """
     results = []
-    for entry in text.split(","):
-        entry = entry.strip()
-        if not entry:
+    lines = [l.rstrip() for l in text.splitlines()]
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
             continue
-        if "|" in entry:
-            creds, games = entry.split("|", 1)
-        else:
-            creds, games = entry, ""
-        if ":" not in creds:
+
+        # Inline pipe format: user:pass|Games
+        if "|" in line and ":" in line.split("|")[0]:
+            creds, games = line.split("|", 1)
+            user, pwd = creds.split(":", 1)
+            if user.strip() and pwd.strip():
+                results.append((user.strip(), pwd.strip(), games.strip()))
+            i += 1
             continue
-        user, pwd = creds.split(":", 1)
-        if user.strip() and pwd.strip():
-            results.append((user.strip(), pwd.strip(), games.strip()))
+
+        # Inline dash format: user:pass - Games
+        norm = line.replace(" - ", "|").replace(" | ", "|")
+        if "|" in norm and ":" in norm.split("|")[0]:
+            creds, games = norm.split("|", 1)
+            user, pwd = creds.split(":", 1)
+            if user.strip() and pwd.strip() and games.strip():
+                results.append((user.strip(), pwd.strip(), games.strip()))
+            i += 1
+            continue
+
+        # Block format: collect non-empty lines, find credentials line
+        block = []
+        while i < len(lines) and lines[i].strip():
+            block.append(lines[i].strip())
+            i += 1
+
+        cred_idx = None
+        for j, bl in enumerate(block):
+            if ":" in bl:
+                user_part = bl.split(":", 1)[0]
+                if user_part and " " not in user_part:
+                    cred_idx = j
+                    break
+
+        if cred_idx is None:
+            continue
+
+        game_lines = [bl for bl in block[:cred_idx] if bl]
+        cred_line  = block[cred_idx]
+        user, pwd  = cred_line.split(":", 1)
+        user, pwd  = user.strip(), pwd.strip()
+
+        if not user or not pwd:
+            continue
+
+        games = ", ".join(game_lines) if game_lines else ""
+        results.append((user, pwd, games))
+
     return results
 
-def parse_simple_text(text: str):
-    """Parse simple user:pass,user:pass format for all other services."""
+
+def parse_simple_file(text: str):
+    """Parses plain user:pass per line files for Xbox, Minecraft, Roblox, Crunchyroll, NordVPN."""
     results = []
-    for entry in text.split(","):
-        entry = entry.strip()
-        if ":" not in entry:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
             continue
-        user, pwd = entry.split(":", 1)
+        user, pwd = line.split(":", 1)
         if user.strip() and pwd.strip():
             results.append((user.strip(), pwd.strip(), ""))
     return results
@@ -461,23 +504,33 @@ async def vouch(interaction: discord.Interaction, message: str):
     await interaction.response.send_message(embed=embed)
 
 # ================= STAFF COMMANDS =================
-@bot.tree.command(name="restock", description="[Staff] Add accounts to stock via text")
+@bot.tree.command(name="restock", description="[Staff] Upload a .txt file to restock accounts")
 @app_commands.describe(
     service="Which service to restock",
-    accounts="Comma separated. Steam: user:pass|Game1/Game2  Others: user:pass,user2:pass2"
+    file="A .txt file. Steam: user:pass|Game1/Game2 per line. Others: user:pass per line."
 )
 @app_commands.choices(service=[app_commands.Choice(name=s.capitalize(), value=s) for s in SERVICES])
 @app_commands.check(staff_check)
-async def restock(interaction: discord.Interaction, service: str, accounts: str):
+async def restock(interaction: discord.Interaction, service: str, file: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
 
+    if not file.filename.endswith(".txt"):
+        await interaction.followup.send("❌ Please upload a `.txt` file.", ephemeral=True)
+        return
+
+    try:
+        text = (await file.read()).decode("utf-8", errors="ignore")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to read file: {e}", ephemeral=True)
+        return
+
     if service == "steam":
-        parsed = parse_steam_text(accounts)
+        parsed = parse_steam_file(text)
     else:
-        parsed = parse_simple_text(accounts)
+        parsed = parse_simple_file(text)
 
     if not parsed:
-        await interaction.followup.send("❌ No valid accounts found. Check your format.", ephemeral=True)
+        await interaction.followup.send("❌ No valid accounts found in file.", ephemeral=True)
         return
 
     table = f"{service}_accounts"
