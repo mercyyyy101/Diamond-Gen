@@ -1,10 +1,12 @@
 import os
 import sqlite3
 import random
-from datetime import date, datetime
+import time
+from datetime import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
+import io
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
@@ -14,8 +16,13 @@ if not TOKEN:
 DB_PATH = "bot.db"
 
 STAFF_ROLE_ID     = 1474823002490405016
+MEMBER_ROLE_ID    = 1474826229520793840
 BOOSTER_ROLE_ID   = 1469733875709378674
 BOOSTER_ROLE_2_ID = 1471590464279810210
+
+COOLDOWN_SECONDS  = 800   # base cooldown for members
+BOOSTER_COOLDOWN  = 400   # half cooldown for boosters
+STAFF_COOLDOWN    = 0     # no cooldown for staff
 
 SERVICES = [
     "steam", "xbox", "minecraft", "roblox",
@@ -46,10 +53,11 @@ def init_db():
                 )
             """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS gens (
-                user_id INTEGER,
-                service TEXT,
-                day     TEXT
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                user_id  INTEGER,
+                service  TEXT,
+                last_gen INTEGER,
+                PRIMARY KEY (user_id, service)
             )
         """)
         cur.execute("""
@@ -78,6 +86,13 @@ def init_db():
                 timestamp TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gens (
+                user_id INTEGER,
+                service TEXT,
+                ts      INTEGER
+            )
+        """)
 
 # ================= HELPERS =================
 def has_role(member, role_id):
@@ -86,33 +101,61 @@ def has_role(member, role_id):
 def is_staff(member):
     return has_role(member, STAFF_ROLE_ID)
 
+def is_member(member):
+    return has_role(member, MEMBER_ROLE_ID) or is_staff(member)
+
 def has_referral(user_id):
     with db() as con:
         cur = con.cursor()
         cur.execute("SELECT 1 FROM referral_uses WHERE user_id=?", (user_id,))
         return cur.fetchone() is not None
 
-def daily_limit(member):
+def get_cooldown(member):
+    """Return cooldown in seconds for this member."""
     if is_staff(member):
-        return 999
+        return STAFF_COOLDOWN
     boosts = sum([has_role(member, BOOSTER_ROLE_ID), has_role(member, BOOSTER_ROLE_2_ID)])
-    limit = 2
-    if boosts == 1:
-        limit = 4
-    elif boosts >= 2:
-        limit = 6
+    cd = COOLDOWN_SECONDS
+    if boosts >= 1:
+        cd = BOOSTER_COOLDOWN
     if has_referral(member.id):
-        limit += 1
-    return limit
+        cd = max(0, cd - 60)  # referral bonus: -60 seconds
+    return cd
 
-def used_today(user_id, service):
+def get_remaining_cooldown(user_id, service, cooldown_secs):
+    """Returns seconds remaining on cooldown, or 0 if ready."""
+    if cooldown_secs == 0:
+        return 0
     with db() as con:
         cur = con.cursor()
         cur.execute(
-            "SELECT COUNT(*) FROM gens WHERE user_id=? AND service=? AND day=?",
-            (user_id, service, date.today().isoformat())
+            "SELECT last_gen FROM cooldowns WHERE user_id=? AND service=?",
+            (user_id, service)
         )
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+    if not row:
+        return 0
+    elapsed = int(time.time()) - row[0]
+    remaining = cooldown_secs - elapsed
+    return max(0, remaining)
+
+def set_cooldown(user_id, service):
+    with db() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO cooldowns (user_id, service, last_gen) VALUES (?,?,?)",
+            (user_id, service, int(time.time()))
+        )
+
+def format_time(seconds):
+    """Format seconds into mm:ss or hh:mm:ss."""
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 def staff_check(interaction: discord.Interaction):
     return is_staff(interaction.user)
@@ -134,7 +177,6 @@ def parse_steam_file(text: str):
         if not line:
             i += 1
             continue
-        # Inline pipe: user:pass|Games
         if "|" in line and ":" in line.split("|")[0]:
             creds, games = line.split("|", 1)
             user, pwd = creds.split(":", 1)
@@ -142,7 +184,6 @@ def parse_steam_file(text: str):
                 results.append((user.strip(), pwd.strip(), games.strip()))
             i += 1
             continue
-        # Inline dash: user:pass - Games
         norm = line.replace(" - ", "|")
         if "|" in norm and ":" in norm.split("|")[0]:
             creds, games = norm.split("|", 1)
@@ -151,7 +192,6 @@ def parse_steam_file(text: str):
                 results.append((user.strip(), pwd.strip(), games.strip()))
             i += 1
             continue
-        # Block format
         block = []
         while i < len(lines) and lines[i].strip():
             block.append(lines[i].strip())
@@ -189,17 +229,17 @@ def parse_simple_file(text: str):
 
 # ================= EMBEDS =================
 SERVICE_COLORS = {
-    "steam":      discord.Color.blue(),
-    "xbox":       discord.Color.green(),
-    "minecraft":  discord.Color.from_rgb(98, 56, 27),
-    "roblox":     discord.Color.from_rgb(226, 35, 26),
-    "crunchyroll":discord.Color.from_rgb(255, 90, 0),
-    "nordvpn":    discord.Color.from_rgb(0, 99, 220),
-    "netflix":    discord.Color.from_rgb(229, 9, 20),
-    "disney":     discord.Color.from_rgb(17, 60, 165),
-    "hotmail":    discord.Color.from_rgb(0, 120, 212),
-    "capcut":     discord.Color.from_rgb(0, 0, 0),
-    "spotify":    discord.Color.from_rgb(30, 215, 96),
+    "steam":       discord.Color.blue(),
+    "xbox":        discord.Color.green(),
+    "minecraft":   discord.Color.from_rgb(98, 56, 27),
+    "roblox":      discord.Color.from_rgb(226, 35, 26),
+    "crunchyroll": discord.Color.from_rgb(255, 90, 0),
+    "nordvpn":     discord.Color.from_rgb(0, 99, 220),
+    "netflix":     discord.Color.from_rgb(229, 9, 20),
+    "disney":      discord.Color.from_rgb(17, 60, 165),
+    "hotmail":     discord.Color.from_rgb(0, 120, 212),
+    "capcut":      discord.Color.from_rgb(50, 50, 50),
+    "spotify":     discord.Color.from_rgb(30, 215, 96),
 }
 
 SERVICE_EMOJI = {
@@ -232,11 +272,11 @@ SERVICE_DISPLAY = {
 
 def service_embed(service: str, user: str, pwd: str, extra: str) -> discord.Embed:
     embed = discord.Embed(
-        title=f"{SERVICE_EMOJI[service]} Generated {SERVICE_DISPLAY[service]} Account",
-        description="Crimson Gen has agreed to only distribute accounts they own.\n"
-                    "Crimson Gen takes no responsibility for what you do with these accounts.",
+        title=f"{SERVICE_EMOJI[service]} {SERVICE_DISPLAY[service]} Account",
+        description="💎 **Diamond Account Gen**\nWe only distribute accounts we own.\nWe take no responsibility for what you do with these accounts.",
         color=SERVICE_COLORS[service],
     )
+    embed.set_author(name="💎 Diamond Account Gen")
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1470798856085307423/1471984801266532362/IMG_7053.gif")
     embed.add_field(name="🔐 Account Details", value=f"`{user}:{pwd}`", inline=False)
     if extra:
@@ -246,7 +286,7 @@ def service_embed(service: str, user: str, pwd: str, extra: str) -> discord.Embe
             value=extra[:1024] if len(extra) <= 1024 else extra[:1021] + "...",
             inline=False,
         )
-    embed.set_footer(text="Enjoy! ❤️")
+    embed.set_footer(text="💎 Diamond Account Gen • Enjoy! ❤️")
     return embed
 
 # ================= PAGINATION =================
@@ -286,7 +326,7 @@ async def on_ready():
     init_db()
     await bot.tree.sync()
     await bot.change_presence(
-        activity=discord.Game(name="🎮 Generating accounts"),
+        activity=discord.Game(name="💎 Diamond Account Gen"),
         status=discord.Status.online,
     )
     print(f"✅ Logged in as {bot.user}")
@@ -298,26 +338,37 @@ async def on_ready():
     game="Steam only — filter by game name (optional)"
 )
 @app_commands.choices(service=[
-    app_commands.Choice(name="🎮 Steam",        value="steam"),
-    app_commands.Choice(name="🟢 Xbox",         value="xbox"),
-    app_commands.Choice(name="⛏️ Minecraft",    value="minecraft"),
-    app_commands.Choice(name="🟥 Roblox",       value="roblox"),
-    app_commands.Choice(name="🍥 Crunchyroll",  value="crunchyroll"),
-    app_commands.Choice(name="🔒 NordVPN",      value="nordvpn"),
-    app_commands.Choice(name="🎬 Netflix",      value="netflix"),
-    app_commands.Choice(name="🏰 Disney+",      value="disney"),
-    app_commands.Choice(name="📧 Hotmail",      value="hotmail"),
-    app_commands.Choice(name="🎵 CapCut",       value="capcut"),
-    app_commands.Choice(name="🎧 Spotify",      value="spotify"),
+    app_commands.Choice(name="🎮 Steam",       value="steam"),
+    app_commands.Choice(name="🟢 Xbox",        value="xbox"),
+    app_commands.Choice(name="⛏️ Minecraft",   value="minecraft"),
+    app_commands.Choice(name="🟥 Roblox",      value="roblox"),
+    app_commands.Choice(name="🍥 Crunchyroll", value="crunchyroll"),
+    app_commands.Choice(name="🔒 NordVPN",     value="nordvpn"),
+    app_commands.Choice(name="🎬 Netflix",     value="netflix"),
+    app_commands.Choice(name="🏰 Disney+",     value="disney"),
+    app_commands.Choice(name="📧 Hotmail",     value="hotmail"),
+    app_commands.Choice(name="🎵 CapCut",      value="capcut"),
+    app_commands.Choice(name="🎧 Spotify",     value="spotify"),
 ])
 async def generate(interaction: discord.Interaction, service: str, game: str = None):
     await interaction.response.defer(ephemeral=True)
 
-    used  = used_today(interaction.user.id, service)
-    limit = daily_limit(interaction.user)
+    # Check member role
+    if not is_member(interaction.user):
+        await interaction.followup.send(
+            "❌ You need the **Member** role to generate accounts.", ephemeral=True
+        )
+        return
 
-    if used >= limit:
-        await interaction.followup.send(f"❌ Daily limit reached ({used}/{limit}).", ephemeral=True)
+    # Check cooldown
+    cd = get_cooldown(interaction.user)
+    remaining = get_remaining_cooldown(interaction.user.id, service, cd)
+    if remaining > 0:
+        await interaction.followup.send(
+            f"⏳ You're on cooldown for **{SERVICE_DISPLAY[service]}**.\n"
+            f"Try again in **{format_time(remaining)}**.",
+            ephemeral=True
+        )
         return
 
     table = f"{service}_accounts"
@@ -343,20 +394,48 @@ async def generate(interaction: discord.Interaction, service: str, game: str = N
 
         acc_id, user, pwd, extra = row
         cur.execute(
-            "INSERT INTO gens VALUES (?,?,?)",
-            (interaction.user.id, service, date.today().isoformat())
+            "INSERT INTO gens (user_id, service, ts) VALUES (?,?,?)",
+            (interaction.user.id, service, int(time.time()))
         )
+
+    # Set cooldown AFTER successful gen
+    set_cooldown(interaction.user.id, service)
 
     embed = service_embed(service, user, pwd, extra)
 
     try:
         await interaction.user.send(embed=embed)
-        await interaction.followup.send("✅ Account sent to your DMs!", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Account sent to your DMs!\n⏳ Next **{SERVICE_DISPLAY[service]}** gen available in **{format_time(cd)}**.",
+            ephemeral=True
+        )
     except discord.Forbidden:
         await interaction.followup.send(
-            f"❌ Couldn't DM you. Enable DMs from server members.\n\n**Account:** `{user}:{pwd}`",
+            f"❌ Couldn't DM you. Enable DMs from server members.\n\n**Account:** `{user}:{pwd}`\n"
+            f"⏳ Next gen available in **{format_time(cd)}**.",
             ephemeral=True,
         )
+
+# ================= /cooldown =================
+@bot.tree.command(name="cooldown", description="Check your current cooldowns")
+async def cooldown_cmd(interaction: discord.Interaction):
+    if not is_member(interaction.user):
+        await interaction.response.send_message("❌ You need the **Member** role.", ephemeral=True)
+        return
+
+    cd = get_cooldown(interaction.user)
+    lines = []
+    for svc in SERVICES:
+        remaining = get_remaining_cooldown(interaction.user.id, svc, cd)
+        if remaining > 0:
+            lines.append(f"{SERVICE_EMOJI[svc]} **{SERVICE_DISPLAY[svc]}:** ⏳ {format_time(remaining)}")
+        else:
+            lines.append(f"{SERVICE_EMOJI[svc]} **{SERVICE_DISPLAY[svc]}:** ✅ Ready")
+
+    embed = discord.Embed(title="⏱️ Your Cooldowns", color=discord.Color.blurple())
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Base cooldown: {format_time(COOLDOWN_SECONDS)}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================= /stock =================
 @bot.tree.command(name="stock", description="View available account stock")
@@ -407,36 +486,37 @@ async def listgames(interaction: discord.Interaction):
     await interaction.response.send_message(pages[0], view=view)
 
 # ================= USER COMMANDS =================
-@bot.tree.command(name="mystats", description="View your daily gen stats")
+@bot.tree.command(name="mystats", description="View your gen stats")
 async def mystats(interaction: discord.Interaction):
-    limit = daily_limit(interaction.user)
-    lines = [
-        f"{SERVICE_EMOJI[svc]} **{SERVICE_DISPLAY[svc]}:** {used_today(interaction.user.id, svc)}/{limit}"
-        for svc in SERVICES
-    ]
+    cd = get_cooldown(interaction.user)
+    with db() as con:
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM gens WHERE user_id=?", (interaction.user.id,))
+        total_gens = cur.fetchone()[0]
+
     ref = has_referral(interaction.user.id)
-    await interaction.response.send_message(
-        "📊 **Your Stats**\n" + "\n".join(lines) + f"\nReferral bonus: **{'Yes' if ref else 'No'}**",
-        ephemeral=True,
-    )
+    embed = discord.Embed(title="📊 Your Stats", color=discord.Color.blurple())
+    embed.add_field(name="🎯 Total Gens",     value=str(total_gens), inline=True)
+    embed.add_field(name="⏱️ Your Cooldown",  value=format_time(cd), inline=True)
+    embed.add_field(name="🎁 Referral Bonus", value="Yes" if ref else "No", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="topusers", description="Top generators today")
+@bot.tree.command(name="topusers", description="Top generators of all time")
 async def topusers(interaction: discord.Interaction):
     with db() as con:
         cur = con.cursor()
         cur.execute(
-            "SELECT user_id, COUNT(*) FROM gens WHERE day=? "
-            "GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10",
-            (date.today().isoformat(),),
+            "SELECT user_id, COUNT(*) FROM gens "
+            "GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10"
         )
         rows = cur.fetchall()
 
     if not rows:
-        await interaction.response.send_message("❌ No gens today.")
+        await interaction.response.send_message("❌ No gens yet.")
         return
 
-    msg = "🏆 **Top Users Today**\n" + "\n".join(
+    msg = "🏆 **Top Users**\n" + "\n".join(
         f"{i}. <@{uid}> — {count}" for i, (uid, count) in enumerate(rows, 1)
     )
     await interaction.response.send_message(msg)
@@ -446,10 +526,9 @@ async def topusers(interaction: discord.Interaction):
 async def boostinfo(interaction: discord.Interaction):
     await interaction.response.send_message(
         "💎 **Boost Perks**\n"
-        "No boost: **2/day**\n"
-        "1 boost: **4/day**\n"
-        "2 boosts: **6/day**\n"
-        "Referral code: **+1/day**",
+        f"No boost: **{format_time(COOLDOWN_SECONDS)}** cooldown\n"
+        f"1+ boost: **{format_time(BOOSTER_COOLDOWN)}** cooldown\n"
+        "Referral code: **-60s** off cooldown",
         ephemeral=True,
     )
 
@@ -468,7 +547,7 @@ async def referral_create(interaction: discord.Interaction):
     await interaction.response.send_message(f"🎁 **Your Referral Code:** `{code}`", ephemeral=True)
 
 
-@bot.tree.command(name="refer", description="Redeem a referral code for +1 daily gen")
+@bot.tree.command(name="refer", description="Redeem a referral code for -60s cooldown")
 @app_commands.describe(code="The 8-digit referral code")
 async def refer(interaction: discord.Interaction, code: str):
     if not code.isdigit() or len(code) != 8:
@@ -488,7 +567,7 @@ async def refer(interaction: discord.Interaction, code: str):
             await interaction.response.send_message("❌ Already redeemed a referral.", ephemeral=True)
             return
         cur.execute("INSERT OR IGNORE INTO referral_uses VALUES (?)", (interaction.user.id,))
-    await interaction.response.send_message("✅ Referral redeemed! +1 daily gen.", ephemeral=True)
+    await interaction.response.send_message("✅ Referral redeemed! -60s off your cooldown.", ephemeral=True)
 
 # ================= REPORT / VOUCH =================
 @bot.tree.command(name="report", description="Report a bad account")
@@ -519,7 +598,7 @@ async def vouch(interaction: discord.Interaction, message: str):
 @bot.tree.command(name="restock", description="[Staff] Upload a .txt file to restock accounts")
 @app_commands.describe(
     service="Which service to restock",
-    file="A .txt file. Steam: user:pass|Game1/Game2 per line. Others: user:pass per line."
+    file="Steam: user:pass|Games per line. Others: user:pass per line."
 )
 @app_commands.choices(service=[
     app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
@@ -538,10 +617,7 @@ async def restock(interaction: discord.Interaction, service: str, file: discord.
         await interaction.followup.send(f"❌ Failed to read file: {e}", ephemeral=True)
         return
 
-    if service == "steam":
-        parsed = parse_steam_file(text)
-    else:
-        parsed = parse_simple_file(text)
+    parsed = parse_steam_file(text) if service == "steam" else parse_simple_file(text)
 
     if not parsed:
         await interaction.followup.send("❌ No valid accounts found in file.", ephemeral=True)
@@ -565,6 +641,42 @@ async def restock(interaction: discord.Interaction, service: str, file: discord.
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="downloadstock", description="[Staff] Download all stock for a service as a .txt file")
+@app_commands.describe(service="Which service to download stock for")
+@app_commands.choices(service=[
+    app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
+])
+@app_commands.check(staff_check)
+async def downloadstock(interaction: discord.Interaction, service: str):
+    await interaction.response.defer(ephemeral=True)
+
+    with db() as con:
+        cur = con.cursor()
+        cur.execute(f"SELECT username, password, extra FROM {service}_accounts ORDER BY id")
+        rows = cur.fetchall()
+
+    if not rows:
+        await interaction.followup.send(f"❌ No stock for **{SERVICE_DISPLAY[service]}**.", ephemeral=True)
+        return
+
+    lines = []
+    for user, pwd, extra in rows:
+        if extra:
+            lines.append(f"{user}:{pwd}|{extra}")
+        else:
+            lines.append(f"{user}:{pwd}")
+
+    content = "\n".join(lines)
+    file_bytes = io.BytesIO(content.encode("utf-8"))
+    file = discord.File(file_bytes, filename=f"{service}_stock.txt")
+
+    await interaction.followup.send(
+        f"📥 **{SERVICE_DISPLAY[service]}** stock — **{len(rows)}** account(s)",
+        file=file,
+        ephemeral=True
+    )
+
+
 @bot.tree.command(name="removeaccount", description="[Staff] Remove an account from stock")
 @app_commands.describe(service="Which service", account="user:pass")
 @app_commands.choices(service=[
@@ -577,6 +689,23 @@ async def removeaccount(interaction: discord.Interaction, service: str, account:
         cur.execute(f"DELETE FROM {service}_accounts WHERE username||':'||password=?", (account,))
         removed = cur.rowcount
     await interaction.response.send_message(f"🗑️ Removed **{removed}** account(s).", ephemeral=True)
+
+
+@bot.tree.command(name="resetcooldown", description="[Staff] Reset a user's cooldown for a service")
+@app_commands.describe(user="The user to reset", service="Which service")
+@app_commands.choices(service=[
+    app_commands.Choice(name=f"{SERVICE_EMOJI[s]} {SERVICE_DISPLAY[s]}", value=s) for s in SERVICES
+])
+@app_commands.check(staff_check)
+async def resetcooldown(interaction: discord.Interaction, user: discord.Member, service: str):
+    with db() as con:
+        con.execute(
+            "DELETE FROM cooldowns WHERE user_id=? AND service=?",
+            (user.id, service)
+        )
+    await interaction.response.send_message(
+        f"✅ Reset **{SERVICE_DISPLAY[service]}** cooldown for {user.mention}.", ephemeral=True
+    )
 
 
 @bot.tree.command(name="reportedaccounts", description="[Staff] View reported accounts")
@@ -630,9 +759,7 @@ async def globalstats(interaction: discord.Interaction):
             )
         cur.execute("SELECT COUNT(*) FROM gens")
         all_gens = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM gens WHERE day=?", (date.today().isoformat(),))
-        today_gens = cur.fetchone()[0]
-    embed.add_field(name="🎯 Gens", value=f"Today: {today_gens} | All time: {all_gens}", inline=False)
+    embed.add_field(name="🎯 Total Gens", value=str(all_gens), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================= RUN =================
